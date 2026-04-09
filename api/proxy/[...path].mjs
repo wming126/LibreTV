@@ -136,6 +136,18 @@ function getRandomUserAgent() {
     return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
+function isTextLikeContentType(contentType = '') {
+    const normalizedType = contentType.toLowerCase();
+    return (
+        normalizedType.startsWith('text/') ||
+        normalizedType.includes('json') ||
+        normalizedType.includes('javascript') ||
+        normalizedType.includes('xml') ||
+        normalizedType.includes('urlencoded') ||
+        normalizedType.includes('svg')
+    );
+}
+
 async function fetchContentWithType(targetUrl, requestHeaders) {
     // 准备请求头
     const headers = {
@@ -145,6 +157,13 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
         // 尝试设置一个合理的 Referer
         'Referer': requestHeaders['referer'] || new URL(targetUrl).origin,
     };
+
+    // --- 针对豆瓣图片的特殊处理 ---
+    if (targetUrl.includes('doubanio.com')) {
+        headers['Referer'] = 'https://movie.douban.com/';
+        logDebug(`检测到豆瓣图片。强制设置 Referer: ${headers['Referer']}`);
+    }
+
     // 清理空值的头
     Object.keys(headers).forEach(key => headers[key] === undefined || headers[key] === null || headers[key] === '' ? delete headers[key] : {});
 
@@ -164,12 +183,12 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
             throw err; // 抛出错误
         }
 
-        // 读取响应内容
-        const content = await response.text();
         const contentType = response.headers.get('content-type') || '';
-        logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
+        const isBinary = !isTextLikeContentType(contentType) && !isM3u8Content('', contentType);
+        const content = isBinary ? await response.buffer() : await response.text();
+        logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}, 二进制: ${isBinary}`);
         // 返回结果
-        return { content, contentType, responseHeaders: response.headers };
+        return { content, contentType, responseHeaders: response.headers, isBinary };
 
     } catch (error) {
         // 捕获 fetch 本身的错误（网络、超时等）或上面抛出的 HTTP 错误
@@ -413,7 +432,7 @@ export default async function handler(req, res) {
         console.info(`开始处理目标 URL 的代理请求: ${targetUrl}`);
 
         // --- 获取并处理目标内容 ---
-        const { content, contentType, responseHeaders } = await fetchContentWithType(targetUrl, req.headers);
+        const { content, contentType, responseHeaders, isBinary } = await fetchContentWithType(targetUrl, req.headers);
 
         // --- 如果是 M3U8，处理并返回 ---
         if (isM3u8Content(content, contentType)) {
@@ -445,6 +464,10 @@ export default async function handler(req, res) {
              });
             // 设置我们自己的缓存策略
             res.setHeader('Cache-Control', `public, max-age=${CACHE_TTL}`);
+
+            if (isBinary && !res.getHeader('Content-Type') && contentType) {
+                res.setHeader('Content-Type', contentType);
+            }
 
             // 发送原始（已解压）内容
             res.status(200).send(content);

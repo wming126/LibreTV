@@ -130,6 +130,13 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
         'Accept-Language': requestHeaders['accept-language'] || 'zh-CN,zh;q=0.9,en;q=0.8',
         'Referer': requestHeaders['referer'] || new URL(targetUrl).origin,
     };
+    
+    // --- 针对豆瓣图片的特殊处理 ---
+    if (targetUrl.includes('doubanio.com')) {
+        headers['Referer'] = 'https://movie.douban.com/';
+        logDebug(`检测到豆瓣图片。强制设置 Referer: ${headers['Referer']}`);
+    }
+
     Object.keys(headers).forEach(key => headers[key] === undefined || headers[key] === null || headers[key] === '' ? delete headers[key] : {});
     logDebug(`Fetching target: ${targetUrl} with headers: ${JSON.stringify(headers)}`);
     try {
@@ -140,10 +147,11 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
             const err = new Error(`HTTP error ${response.status}: ${response.statusText}. URL: ${targetUrl}. Body: ${errorBody.substring(0, 200)}`);
             err.status = response.status; throw err;
         }
-        const content = await response.text();
         const contentType = response.headers.get('content-type') || '';
-        logDebug(`Fetch success: ${targetUrl}, Content-Type: ${contentType}, Length: ${content.length}`);
-        return { content, contentType, responseHeaders: response.headers };
+        const isBinary = !isTextLikeContentType(contentType) && !isM3u8Content('', contentType);
+        const content = isBinary ? Buffer.from(await response.arrayBuffer()) : await response.text();
+        logDebug(`Fetch success: ${targetUrl}, Content-Type: ${contentType}, Length: ${content.length}, Binary: ${isBinary}`);
+        return { content, contentType, responseHeaders: response.headers, isBinary };
     } catch (error) {
         logDebug(`Fetch exception for ${targetUrl}: ${error.message}`);
         throw new Error(`Failed to fetch target URL ${targetUrl}: ${error.message}`);
@@ -153,6 +161,16 @@ async function fetchContentWithType(targetUrl, requestHeaders) {
 function isM3u8Content(content, contentType) {
     if (contentType && (contentType.includes('application/vnd.apple.mpegurl') || contentType.includes('application/x-mpegurl') || contentType.includes('audio/mpegurl'))) { return true; }
     return content && typeof content === 'string' && content.trim().startsWith('#EXTM3U');
+}
+
+function isTextLikeContentType(contentType = '') {
+    const normalizedType = contentType.toLowerCase();
+    return normalizedType.startsWith('text/') ||
+        normalizedType.includes('json') ||
+        normalizedType.includes('javascript') ||
+        normalizedType.includes('xml') ||
+        normalizedType.includes('urlencoded') ||
+        normalizedType.includes('svg');
 }
 
 function processKeyLine(line, baseUrl) { return line.replace(/URI="([^"]+)"/, (match, uri) => { const absoluteUri = resolveUrl(baseUrl, uri); logDebug(`Processing KEY URI: Original='${uri}', Absolute='${absoluteUri}'`); return `URI="${rewriteUrlToProxy(absoluteUri)}"`; }); }
@@ -271,7 +289,7 @@ export const handler = async (event, context) => {
         }
 
         // Fetch Original Content (Pass Netlify event headers)
-        const { content, contentType, responseHeaders } = await fetchContentWithType(targetUrl, event.headers);
+        const { content, contentType, responseHeaders, isBinary } = await fetchContentWithType(targetUrl, event.headers);
 
         // --- Process if M3U8 ---
         if (isM3u8Content(content, contentType)) {
@@ -310,8 +328,8 @@ export const handler = async (event, context) => {
             return {
                 statusCode: 200,
                 headers: netlifyHeaders,
-                body: content, // Body as string
-                // isBase64Encoded: false, // Set true only if returning binary data as base64
+                body: isBinary ? content.toString('base64') : content,
+                isBase64Encoded: isBinary,
             };
         }
 

@@ -184,7 +184,9 @@ app.get('/proxy/:encodedUrl', async (req, res) => {
           responseType: 'stream',
           timeout: config.timeout,
           headers: {
-            'User-Agent': config.userAgent
+            'User-Agent': config.userAgent,
+            // --- 针对豆瓣图片的特殊处理 ---
+            ...(targetUrl.includes('doubanio.com') && { 'Referer': 'https://movie.douban.com/' })
           }
         });
       } catch (error) {

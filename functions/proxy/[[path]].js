@@ -117,7 +117,7 @@ export async function onRequest(context) {
     }
 
     // 验证鉴权（主函数调用）
-    if (!validateAuth(request, env)) {
+    if (!await validateAuth(request, env)) {
         return new Response('Unauthorized', { 
             status: 401,
             headers: {
@@ -192,6 +192,16 @@ export async function onRequest(context) {
         });
     }
 
+    function isTextLikeContentType(contentType = '') {
+        const normalizedType = contentType.toLowerCase();
+        return normalizedType.startsWith('text/') ||
+            normalizedType.includes('json') ||
+            normalizedType.includes('javascript') ||
+            normalizedType.includes('xml') ||
+            normalizedType.includes('urlencoded') ||
+            normalizedType.includes('svg');
+    }
+
     // 获取随机 User-Agent
     function getRandomUserAgent() {
         return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
@@ -257,6 +267,12 @@ export async function onRequest(context) {
             'Referer': request.headers.get('Referer') || new URL(targetUrl).origin
         });
 
+        // --- 针对豆瓣图片的特殊处理 ---
+        if (targetUrl.includes('doubanio.com')) {
+            headers.set('Referer', 'https://movie.douban.com/');
+            logDebug(`检测到豆瓣图片。强制设置 Referer: https://movie.douban.com/`);
+        }
+
         try {
             // 直接请求目标 URL
             logDebug(`开始直接请求: ${targetUrl}`);
@@ -269,11 +285,11 @@ export async function onRequest(context) {
                  throw new Error(`HTTP error ${response.status}: ${response.statusText}. URL: ${targetUrl}. Body: ${errorBody.substring(0, 150)}`);
             }
 
-            // 读取响应内容为文本
-            const content = await response.text();
             const contentType = response.headers.get('Content-Type') || '';
-            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
-            return { content, contentType, responseHeaders: response.headers }; // 同时返回原始响应头
+            const isBinary = !isTextLikeContentType(contentType) && !isM3u8Content('', contentType);
+            const content = isBinary ? await response.arrayBuffer() : await response.text();
+            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.byteLength || content.length}, 二进制: ${isBinary}`);
+            return { content, contentType, responseHeaders: response.headers, isBinary }; // 同时返回原始响应头
 
         } catch (error) {
              logDebug(`请求彻底失败: ${targetUrl}: ${error.message}`);
@@ -539,10 +555,10 @@ export async function onRequest(context) {
         }
 
         // --- 实际请求 ---
-        const { content, contentType, responseHeaders } = await fetchContentWithType(targetUrl);
+        const { content, contentType, responseHeaders, isBinary } = await fetchContentWithType(targetUrl);
 
         // --- 写入缓存 (KV) ---
-        if (kvNamespace) {
+        if (kvNamespace && !isBinary) {
              try {
                  const headersToCache = {};
                  responseHeaders.forEach((value, key) => { headersToCache[key.toLowerCase()] = value; });
@@ -565,11 +581,15 @@ export async function onRequest(context) {
             logDebug(`内容不是 M3U8 (类型: ${contentType})，直接返回: ${targetUrl}`);
             const finalHeaders = new Headers(responseHeaders);
             finalHeaders.set('Cache-Control', `public, max-age=${CACHE_TTL}`);
+            finalHeaders.delete('Content-Encoding');
+            finalHeaders.delete('content-encoding');
+            finalHeaders.delete('Content-Length');
+            finalHeaders.delete('content-length');
             // 添加 CORS 头，确保非 M3U8 内容也能跨域访问（例如图片、字幕文件等）
             finalHeaders.set("Access-Control-Allow-Origin", "*");
             finalHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
             finalHeaders.set("Access-Control-Allow-Headers", "*");
-            return createResponse(content, 200, finalHeaders);
+            return createResponse(isBinary ? new Uint8Array(content) : content, 200, finalHeaders);
         }
 
     } catch (error) {
